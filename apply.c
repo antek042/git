@@ -730,11 +730,25 @@ static char *find_name(struct strbuf *root,
 	return find_name_common(root, line, def, p_value, NULL, terminate);
 }
 
-static char *find_name_traditional(struct strbuf *root,
+static int path_exists_in_worktree(struct apply_state *state, const char *name)
+{
+	struct stat st;
+	char *path;
+	int ret;
+
+	path = state->prefix ? prefix_filename(state->prefix, name) : xstrdup(name);
+	ret = !lstat(path, &st);
+	free(path);
+	return ret;
+}
+
+static char *find_name_traditional(struct apply_state *state,
 				   const char *line,
 				   char *def,
 				   int p_value)
 {
+	struct strbuf *root = &state->root;
+	char *name_without_timestamp, *name_with_timestamp;
 	size_t len;
 	size_t date_len;
 
@@ -748,9 +762,26 @@ static char *find_name_traditional(struct strbuf *root,
 	date_len = diff_timestamp_len(line, len);
 	if (!date_len)
 		return find_name_common(root, line, def, p_value, NULL, TERM_TAB);
-	len -= date_len;
 
-	return find_name_common(root, line, def, p_value, line + len, 0);
+	name_without_timestamp = find_name_common(root, line, def, p_value,
+						  line + len - date_len, 0);
+
+	if (state->cached)
+		return name_without_timestamp;
+
+	if (path_exists_in_worktree(state, name_without_timestamp))
+		return name_without_timestamp;
+
+	name_with_timestamp = find_name_common(root, line, def, p_value,
+					       NULL, TERM_TAB);
+
+	if (path_exists_in_worktree(state, name_with_timestamp)) {
+		free(name_without_timestamp);
+		return name_with_timestamp;
+	}
+
+	free(name_with_timestamp);
+	return name_without_timestamp;
 }
 
 /*
@@ -764,7 +795,7 @@ static int guess_p_value(struct apply_state *state, const char *nameline)
 
 	if (is_dev_null(nameline))
 		return -1;
-	name = find_name_traditional(&state->root, nameline, NULL, 0);
+	name = find_name_traditional(state, nameline, NULL, 0);
 	if (!name)
 		return -1;
 	cp = strchr(name, '/');
@@ -863,8 +894,8 @@ static int has_epoch_timestamp(const char *nameline)
  * Get the name etc info from the ---/+++ lines of a traditional patch header
  *
  * FIXME! The end-of-filename heuristics are kind of screwy. For existing
- * files, we can happily check the index for a match, but for creating a
- * new file we should try to match whatever "patch" does. I have no idea.
+ * files we check which candidate name is present, but for creating a new
+ * file we should try to match whatever "patch" does.
  */
 static int parse_traditional_patch(struct apply_state *state,
 				   const char *first,
@@ -888,17 +919,17 @@ static int parse_traditional_patch(struct apply_state *state,
 	if (is_dev_null(first)) {
 		patch->is_new = 1;
 		patch->is_delete = 0;
-		name = find_name_traditional(&state->root, second, NULL, state->p_value);
+		name = find_name_traditional(state, second, NULL, state->p_value);
 		patch->new_name = name;
 	} else if (is_dev_null(second)) {
 		patch->is_new = 0;
 		patch->is_delete = 1;
-		name = find_name_traditional(&state->root, first, NULL, state->p_value);
+		name = find_name_traditional(state, first, NULL, state->p_value);
 		patch->old_name = name;
 	} else {
 		char *first_name;
-		first_name = find_name_traditional(&state->root, first, NULL, state->p_value);
-		name = find_name_traditional(&state->root, second, first_name, state->p_value);
+		first_name = find_name_traditional(state, first, NULL, state->p_value);
+		name = find_name_traditional(state, second, first_name, state->p_value);
 		free(first_name);
 		if (has_epoch_timestamp(first)) {
 			patch->is_new = 1;
